@@ -1,0 +1,310 @@
+---
+title: "R Notebook Template for Competition"
+author: "Group 3"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    df_print: paged
+    number_sections: true
+    theme: readable
+    toc: true
+  pdf_document:
+    toc: true
+---
+
+```{r global-options, echo = FALSE, message = FALSE}
+knitr::opts_chunk$set(warning = FALSE, 
+                      fig.height = 4,
+                      fig.width = 10,
+                      fig.align = "center")
+```
+
+
+```{r echo = FALSE}
+train = read.csv("Competition_Train.csv")
+test = read.csv("Competition_Test.csv")
+str(train)
+```
+
+# DATA PRE-PROCESSING
+In order to create predictive models from the data set, categorical variables were converted into factor variables for future model creation. The following factors have been changed to factors for further processing:
+
+```{r echo = FALSE}
+train$potential_issue = as.factor(train$potential_issue)
+train[18:23] = lapply(train[18:23], as.factor)
+test$potential_issue = as.factor(test$potential_issue)
+test[18:22] = lapply(test[18:22], as.factor)
+
+train_factor_cols <- names(train)[sapply(train, is.factor)]
+test_factor_cols <- names(test)[sapply(test, is.factor)]
+
+str(train[train_factor_cols])
+str(test[test_factor_cols])
+```
+
+```{r}
+train1 <- train
+test1 <- test
+
+#Tranformation
+##Applying log transformation to right-skewed variables in the training set and test data set
+right_skewed_vars <- c("national_inv", "in_transit_qty", "forecast_3_month", "forecast_6_month", "forecast_9_month","sales_1_month","sales_3_month", "sales_6_month","sales_9_month", "min_bank", "pieces_past_due", "local_bo_qty")
+
+train1[, right_skewed_vars] <- log1p(abs(train1[, right_skewed_vars]))
+test1[, right_skewed_vars] <- log1p(abs(test1[, right_skewed_vars]))
+
+#Normalization
+##Applying log transformation to training set and test data set
+train1[, right_skewed_vars] <- scale(train1[, right_skewed_vars])
+test1[, right_skewed_vars] <- scale(test1[, right_skewed_vars])
+
+```
+
+
+
+```{r echo = TRUE, message = FALSE, warning = FALSE}
+library(caTools)
+library(caret)
+
+set.seed(123)
+split = sample.split(train1$went_on_backorder, SplitRatio = 0.7)
+Train = subset(train1, split == TRUE)
+Validation = subset(train1, split == FALSE)
+```
+
+```{r}
+# We would like to keep copies of original training and test sets for later operations.
+limitedTrain = Train
+limitedTrain$went_on_backorder = NULL
+limitedValidation = Validation
+limitedValidation$went_on_backorder = NULL
+```
+
+```{r}
+preproc = preProcess(limitedTrain)
+normTrain = predict(preproc, limitedTrain)
+normValidation = predict(preproc, limitedValidation)
+summary(normTrain)
+```
+
+```{r echo = TRUE, message = FALSE, warning = FALSE}
+# You may need to install the "psych" package first.
+library(psych)
+```
+
+```{r}
+SD(normTrain, na.rm = TRUE)
+```
+
+```{r}
+set.seed(123)
+km = kmeans(normTrain, centers = 3)
+```
+
+```{r results = "hide", echo = TRUE, message = FALSE, warning = FALSE}
+# The two packages, "flexclust" and "kernlab" (used by "caret"), implement two different objects using the same name, 'kcca', which creates some trouble for R to recognize which one to use (by default the one loaded first in R is chosen). Therefore, in case you run into any errors, you have to explicitly remove the 'kcca' object from the cache first before loading the "flexclust" package by activating the following line of code.
+# removeClass("kcca", where = .GlobalEnv)
+library(flexclust)
+str(normTrain)
+```
+
+
+
+```{r}
+# Convert factor columns to numeric
+normTrain$potential_issue <- as.numeric(normTrain$potential_issue)
+normTrain$deck_risk <- as.numeric(normTrain$deck_risk)
+normTrain$oe_constraint <- as.numeric(normTrain$oe_constraint)
+normTrain$ppap_risk <- as.numeric(normTrain$ppap_risk)
+normTrain$stop_auto_buy <- as.numeric(normTrain$stop_auto_buy)
+normTrain$rev_stop <- as.numeric(normTrain$rev_stop)
+
+# Convert factor columns to numeric
+normValidation$potential_issue <- as.numeric(normValidation$potential_issue)
+normValidation$deck_risk <- as.numeric(normValidation$deck_risk)
+normValidation$oe_constraint <- as.numeric(normValidation$oe_constraint)
+normValidation$ppap_risk <- as.numeric(normValidation$ppap_risk)
+normValidation$stop_auto_buy <- as.numeric(normValidation$stop_auto_buy)
+normValidation$rev_stop <- as.numeric(normValidation$rev_stop)
+
+# Now you can proceed with your analysis or clustering
+```
+
+```{r}
+
+# Convert K-means result to kcca object
+km_kcca <- as.kcca(km, normTrain)
+
+# Predict clusters for training and testing data
+clusterTrain <- predict(km_kcca)
+clusterValidation <- predict(km_kcca, newdata = normValidation)
+
+# Subset training and testing data based on clusters
+Train1 <- Train[clusterTrain == 1, ]
+Train2 <- Train[clusterTrain == 2, ]
+Train3 <- Train[clusterTrain == 3, ]
+
+Validation1 <- Validation[clusterValidation == 1, ]
+Validation2 <- Validation[clusterValidation == 2, ]
+Validation3 <- Validation[clusterValidation == 3, ]
+
+```
+
+
+```{r}
+# You may get some warning messages here and in the next code chunk because some clusters have only one type of the outcomes.
+Model1 = glm(went_on_backorder ~ ., data=Train1, family = binomial)
+Model2 = glm(went_on_backorder ~ ., data=Train2, family = binomial)
+Model3 = glm(went_on_backorder ~ ., data=Train3, family = binomial)
+
+```
+
+```{r}
+validationPredict1 = predict(Model1, newdata = Validation1, type = "response")
+conf1 = table(Validation1$went_on_backorder, validationPredict1 >= 0.1)
+conf1
+validationPredict2 = predict(Model2, newdata = Validation2, type = "response")
+conf2 = table(Validation2$went_on_backorder, validationPredict2 >= 0.1)
+conf2
+validationPredict3 = predict(Model3, newdata = Validation3, type = "response")
+conf3 = table(Validation3$went_on_backorder, validationPredict3 >= 0.1)
+conf3
+
+# Calculate accuracy for each model
+accuracy1 <- sum(diag(conf1)) / sum(conf1)
+accuracy2 <- sum(diag(conf2)) / sum(conf2)
+accuracy3 <- sum(diag(conf3)) / sum(conf3)
+
+# Print the accuracies
+cat("Accuracy for Model 1:", accuracy1, "\n")
+cat("Accuracy for Model 2:", accuracy2, "\n")
+cat("Accuracy for Model 3:", accuracy3, "\n")
+
+```
+```{r}
+AllPredictions = c(validationPredict1, validationPredict2, validationPredict3)
+AllOutcomes = c(Validation1$went_on_backorder, Validation2$went_on_backorder, Validation3$went_on_backorder)
+confAll = table(AllOutcomes, AllPredictions >= 0.1)
+confAll
+```
+
+```{r}
+Model = glm(went_on_backorder ~ ., data = Train, family = binomial)
+validationPredict = predict(Model, newdata = Validation, type = "response")
+confLog = table(Validation$went_on_backorder, validationPredict >= 0.1)
+confLog
+```
+
+
+```{r}
+# We would like to keep copies of original training and test sets for later operations.
+limitedTest = test
+limitedTest$went_on_backorder = NULL
+```
+
+```{r}
+preproc = preProcess(limitedTest)
+normTest = predict(preproc, limitedTest)
+summary(normTest)
+```
+
+```{r}
+# Convert factor columns to numeric
+normTest$potential_issue <- as.numeric(normTest$potential_issue)
+normTest$deck_risk <- as.numeric(normTest$deck_risk)
+normTest$oe_constraint <- as.numeric(normTest$oe_constraint)
+normTest$ppap_risk <- as.numeric(normTest$ppap_risk)
+normTest$stop_auto_buy <- as.numeric(normTest$stop_auto_buy)
+normTest$rev_stop <- as.numeric(normTest$rev_stop)
+```
+
+```{r}
+km.kcca = as.kcca(km, normTest)
+
+clusterTest = predict(km.kcca, newdata = normTest)
+
+Test1 = subset(test, clusterTest == 1)
+Test2 = subset(test, clusterTest == 2)
+Test3 = subset(test, clusterTest == 3)
+```
+
+
+
+```{r}
+# Prediction
+testpred1 = predict(Model1, newdata = Test1, type = "response")
+testpred2 = predict(Model2, newdata = Test2, type = "response")
+testpred3 = predict(Model3, newdata = Test3, type = "response")
+```
+
+
+```{r}
+AllPredictions = c(testpred1, testpred2, testpred3)
+PredTest = data.frame(test$sku, AllPredictions)
+str(PredTest)
+```
+
+
+```{r}
+# Split the data into training and testing set 
+str(Train)
+str(Validation)
+```
+
+```{r}
+# Convert factor columns to numeric
+Train$potential_issue <- as.numeric(Train$potential_issue)
+Train$deck_risk <- as.numeric(Train$deck_risk)
+Train$oe_constraint <- as.numeric(Train$oe_constraint)
+Train$ppap_risk <- as.numeric(Train$ppap_risk)
+Train$stop_auto_buy <- as.numeric(Train$stop_auto_buy)
+Train$rev_stop <- as.numeric(Train$rev_stop)
+Train$went_on_backorder <- as.numeric(Train$went_on_backorder)
+
+# Convert factor columns to numeric
+Validation$potential_issue <- as.numeric(Validation$potential_issue)
+Validation$deck_risk <- as.numeric(Validation$deck_risk)
+Validation$oe_constraint <- as.numeric(Validation$oe_constraint)
+Validation$ppap_risk <- as.numeric(Validation$ppap_risk)
+Validation$stop_auto_buy <- as.numeric(Validation$stop_auto_buy)
+Validation$rev_stop <- as.numeric(Validation$rev_stop)
+Validation$went_on_backorder <- as.numeric(Validation$went_on_backorder)
+
+str(Train)
+```
+
+```{r}
+# Install and load the gbm package
+install.packages("gbm")
+library(gbm)
+```
+
+
+```{r}
+# Split the data into training and testing sets
+set.seed(42)  # for reproducibility
+train_index <- sample(nrow(train), 0.8 * nrow(train))
+train_data <- train[train_index, ]
+test_data <- train[-train_index, ]
+
+# Train the Gradient Boosted Tree model
+gb_model <- gbm(went_on_backorder ~ ., data = train_data, distribution = "bernoulli", n.trees = 1000, interaction.depth = 3, shrinkage = 0.1, cv.folds = 5)
+
+# Make predictions on the testing data
+predictions <- predict(gb_model, newdata = test_data, type = "response")
+
+# Convert predicted probabilities to binary predictions (0 or 1)
+binary_predictions <- ifelse(predictions > 0.5, 1, 0)
+
+# Evaluate the model's performance
+accuracy <- mean(binary_predictions == test_data$went_on_backorder)
+print(paste("Accuracy:", accuracy))
+
+```
+
+
+```{r}
+colnames(PredTest) = c("sku", "went_on_backorder")
+str(PredTest)
+write.csv(PredTest, "Group3kMeansprediction.csv", row.names = FALSE)
+```
