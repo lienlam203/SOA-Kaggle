@@ -1,0 +1,581 @@
+---
+title: "R Notebook Template for Competition"
+author: "Group 3"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    df_print: paged
+    number_sections: true
+    theme: readable
+    toc: true
+  pdf_document:
+    toc: true
+---
+
+```{r global-options, echo = FALSE, message = FALSE}
+knitr::opts_chunk$set(warning = FALSE, 
+                      fig.height = 4,
+                      fig.width = 10,
+                      fig.align = "center")
+```
+
+```{r echo = FALSE, message = FALSE}
+#Run all packages required
+library(moments)
+library(tidyverse)
+library(magrittr)
+library(caret)
+library(e1071)
+library(boot)
+library(ROCR)
+library(glmnet)
+library(corrplot)
+library(knitr)
+library(kableExtra)
+set.seed(123)
+```
+
+```{r echo = FALSE}
+train = read.csv("Competition_Train.csv")
+test = read.csv("Competition_Test.csv")
+attach(train)
+```
+
+# EXPLORATORY DATA ANALYSIS (EDA)
+## Imbalanced data structure
+
+In order to test and observe the imbalanced data structure, we executed a frequency count of the target variable *went_on_backorder* using the *table()* function in R. 
+
+The results revealed an **imbalanced structure**, with a substantially higher number of instances where products did not go on backorder (coded as '0') as compared to the instances of backorders (coded as '1'). Specifically, there were **49,624 instances of no backorder** and **9,295 instances of backorders**, resulting in a backorder rate of approximately 15.8%. This significant disproportion indicates that any predictive modeling performed on this data without addressing the imbalance might be biased toward predicting the majority class, potentially undermining the model's ability to accurately predict backorders.
+
+```{r}
+table(train$went_on_backorder)
+overall_backorder_rate = 9295 / (49624 + 9295)
+print(overall_backorder_rate)
+```
+
+In order to create predictive models from the data set, categorical variables were converted into factor variables for future model creation. The following factors have been changed to factors for further processing:
+
+```{r echo = FALSE}
+train$potential_issue = as.factor(train$potential_issue)
+train[18:23] = lapply(train[18:23], as.factor)
+test$potential_issue = as.factor(test$potential_issue)
+test[18:22] = lapply(test[18:22], as.factor)
+
+train_factor_cols <- names(train)[sapply(train, is.factor)]
+test_factor_cols <- names(test)[sapply(test, is.factor)]
+
+str(train[train_factor_cols])
+str(test[test_factor_cols])
+```
+
+## Checking for Correlation
+We want to understand the relationship between the numerical variables. To do so, we use a correlation matrix in the form of a heatmap to look at the correlation coefficients between each pair of numerical variables. 
+
+A heatmap visualizes the correlation matrix, revealing the strength and direction of relationships between variables. We used a threshold of 0.9 to flag out any highly correlated pairs to address multicollinearity issues.
+
+However, correlation does not necessarily imply causation, and that there may be other factors that influence the relationship between these variables. Therefore, it's important to consider other variables that may be relevant to the relationships between each pair of variables.
+
+```{r echo = FALSE}
+numeric_df <- train[sapply(train, is.numeric)]
+numeric_df <- numeric_df[, !(names(numeric_df) %in% c("sku"))]
+cor_matrix <- cor(numeric_df)
+corrplot(cor_matrix, method = "square")
+threshold <- 0.9
+```
+
+Based on the Matrix table above, the variables that have high correlation(above `r threshold`) are:
+
+```{r echo = FALSE}
+# Find high correlation pairs
+high_correlation_pairs <- which(cor_matrix > threshold & cor_matrix < 1, arr.ind = TRUE)
+
+# Extract variable names and corresponding correlation scores
+variable1 <- colnames(cor_matrix)[high_correlation_pairs[, 2]]
+variable2 <- rownames(cor_matrix)[high_correlation_pairs[, 1]]
+correlation_score <- cor_matrix[high_correlation_pairs]
+
+# Create a data frame to store the results
+high_correlation_table <- data.frame(
+  "Variable 1" = variable1,
+  "Variable 2" = variable2,
+  Score = correlation_score
+)
+
+# Remove reverse pairs
+high_correlation_table <- high_correlation_table[!duplicated(apply(high_correlation_table, 1, function(x) paste(sort(x), collapse = "-"))), ]
+
+# Print the table using kable and kableExtra for formatting
+high_correlation_table %>%
+  kable(col.names = c("Variable 1", "Variable 2", "Score")) %>%
+  kable_styling(full_width = FALSE) %>%
+  column_spec(3, width = "3cm")
+```
+Notably, groups of forecast variables (3-month, 6-month, 9-month) appear to have strong positive correlations with each other, as indicated by the blocks of darker blue, suggesting that they tend to increase together and could be important factors in predicting outcomes related to inventory and sales.
+
+Regardless, we can't conclude whether potential multi-collinearity issues have any impacts on our outcomes until we run the predictive models to interpret the regression coefficients. Hence, for now, we decided to move forward without removing any variables that are highly correlated. 
+
+## Check for Outliers
+Outliers can influence statistical analysis, potentially leading to biased estimates and inaccurate conclusions. Therefore, we did a check for outliers by utilizing boxplots. Our findings are as such:
+ 
+```{r echo = FALSE}
+par(mfrow = c(1,4))
+plot_distance <- boxplot(train$national_inv, xlab = "National Inventory")
+plot_distance <- boxplot(train$lead_time, xlab = "Lead Time")
+plot_distance <- boxplot(train$in_transit_qty, xlab = "In Transit Quantity")
+plot_distance <- boxplot(train$forecast_3_month, xlab = "Forecast 3 month")
+plot_distance <- boxplot(train$forecast_6_month, xlab = "Forecast 6 month")
+plot_distance <- boxplot(train$forecast_9_month, xlab = "Forecast 9 month")
+plot_distance <- boxplot(train$sales_1_month, xlab = "Sales 1 month")
+plot_distance <- boxplot(train$sales_3_month, xlab = "Sales 3 month")
+plot_distance <- boxplot(train$sales_6_month, xlab = "Sales 6 month")
+plot_distance <- boxplot(train$sales_9_month, xlab = "Sales 9 month")
+plot_distance <- boxplot(train$min_bank, xlab = "Min Bank")
+plot_distance <- boxplot(train$pieces_past_due, xlab = "Pieces past due")
+plot_distance <- boxplot(train$local_bo_qty , xlab = "Local BO Qty")
+plot_distance <- boxplot(train$perf_12_month_avg, xlab = "Performance 12 month Average")
+
+# No outliers because they are categorical variables
+#plot_distance <- boxplot(train$deck_risk, xlab = "Deck Risk")
+#plot_distance <- boxplot(train$ppap_risk, xlab = "PPap Risk")
+#plot_distance <- boxplot(train$potential_issue, xlab = "Potential Issue")
+#plot_distance <- boxplot(train$rev_stop, xlab = "Rev Stop")
+#plot_distance <- boxplot(train$went_on_backorder, xlab = "went_on_backorder")
+#plot_distance <- boxplot(train$stop_auto_buy, xlab ="Stop Auto Buy")
+
+outliers1 <- identify(train$national_inv)
+outliers2 <- identify(train$lead_time)
+outliers3 <- identify(train$in_transit_qty)
+outliers4 <- identify(train$forecast_3_month)
+outliers5 <- identify(train$forecast_6_month)
+outliers6 <- identify(train$forecast_9_month) 
+outliers7 <- identify(train$sales_1_month)
+outliers8 <- identify(train$sales_3_month)
+outliers9 <- identify(train$sales_6_month)   
+outliers10 <- identify(train$sales_9_month)      
+outliers11 <- identify(train$min_bank)                     
+outliers12 <- identify(train$pieces_past_due)
+outliers13 <- identify(train$local_bo_qty)   
+
+train <- subset(train, !(national_inv %in% outliers1))
+```
+ 
+Majority of the variables have outliers except for *deck_risk, ppap_risk, potential_issue, rev_stop, went_on_backorder* and *stop_auto_buy* because they are binary categorical variables, only taking on values of 0 or 1. However, we will take on a cautious approach and will not be removing these outliers due to insufficient information to know if it is a legitimate observation or a measurement/data entry error and reduce the possibility of a biased understanding of the data distribution and trends. 
+
+Moreover, in the context of analysis and referencing real-world supply chain dynamics, we believe that these variables, especially those related to quantity in units, can take on large values because of uncertain supply chain disruptive factors that might disrupt the company performance. Hence, stockpiling their inventories to avoid bottlenecks during lead time is understandable. Besides, as we observe from the box plot of lead time, there are outliers too, suggesting that lead time is indeed long. This further supports our belief that variables related to quantity in units tend to take on large values.
+
+
+# DATA PRE-PROCESSING
+
+## Transformation and Normalization
+Before analysis, we have to also check the distribution of the data. A heavily skewed data would result in a predictive model that may not perform accurate predictions of out-of-sample data as it doesn't accurately capture the trends of the dataset. As such, we ran the skewness test on all numeric variables (non-binary variables) and our findings are as follows:
+
+```{r echo = FALSE}
+skewness_scores <- c(
+  skewness(train$national_inv, na.rm = TRUE),
+  skewness(train$lead_time, na.rm = TRUE),
+  skewness(train$in_transit_qty, na.rm = TRUE),
+  skewness(train$forecast_3_month, na.rm = TRUE),
+  skewness(train$forecast_6_month, na.rm = TRUE),
+  skewness(train$forecast_9_month, na.rm = TRUE),
+  skewness(train$sales_1_month, na.rm = TRUE),
+  skewness(train$sales_3_month, na.rm = TRUE),
+  skewness(train$sales_6_month, na.rm = TRUE),
+  skewness(train$sales_9_month, na.rm = TRUE),
+  skewness(train$min_bank, na.rm = TRUE),
+  skewness(train$pieces_past_due, na.rm = TRUE),
+  skewness(train$perf_12_month_avg, na.rm = TRUE),
+  skewness(train$local_bo_qty, na.rm = TRUE)
+)
+
+variable_names <- c(
+  "national_inv",
+  "lead_time",
+  "in_transit_qty",
+  "forecast_3_month",
+  "forecast_6_month",
+  "forecast_9_month",
+  "sales_1_month",
+  "sales_3_month",
+  "sales_6_month",
+  "sales_9_month",
+  "min_bank",
+  "pieces_past_due",
+  "perf_12_month_avg",
+  "local_bo_qty"
+)
+
+skewness_table <- data.frame(
+  Variable = variable_names,
+  Skewness = skewness_scores
+)
+
+kable(skewness_table, align = c("l", "c"))
+```
+
+
+For the right-skewed variables in both train and test set, we decided to normalize the data using log transformation in order to generate a better regression model.
+```{r}
+train1 <- train
+test1 <- test
+
+#Tranformation
+##Applying log transformation to right-skewed variables in the training set and test data set
+right_skewed_vars <- c("national_inv", "in_transit_qty", "forecast_3_month", "forecast_6_month", "forecast_9_month","sales_1_month","sales_3_month", "sales_6_month","sales_9_month", "min_bank", "pieces_past_due", "local_bo_qty")
+
+train1[, right_skewed_vars] <- log1p(abs(train1[, right_skewed_vars]))
+test1[, right_skewed_vars] <- log1p(abs(test1[, right_skewed_vars]))
+
+#Normalization
+##Applying log transformation to training set and test data set
+train1[, right_skewed_vars] <- scale(train1[, right_skewed_vars])
+test1[, right_skewed_vars] <- scale(test1[, right_skewed_vars])
+```
+
+After these pre-processing and cleaning steps are taken, our data is finally ready for analysis.
+
+# Milestone 1 Analysis
+
+## Oversampling and Downsampling experimentation
+From EDA, we discovered that the data structure is imbalanced with products that are not on backorder being much greater than those that went on to be backorders (68% greater in percentage value). Hence, we decide to consider either oversampling or downsampling before moving on to build our models. 
+   0     1 
+49624  9295
+
+### Install and load required packages to do oversampling and downsampling: ROSE package
+```{r}
+#install.packages(c("ROSE", "caret", "glmnet"))
+library(ROSE)
+```
+
+
+### Oversampling Train Data
+```{r}
+# Apply SMOTE to the training dataset
+train_oversampled <- ROSE(went_on_backorder ~ ., data = train1 , seed = 123, p = 0.5)$data
+
+# Check levels
+levels(train_oversampled$went_on_backorder)
+
+# Make names valid
+new_levels <- make.names(levels(train_oversampled $went_on_backorder), unique = TRUE)
+new_levels <- make.names(levels(train1 $went_on_backorder), unique = TRUE)
+
+# Refactor the response variable
+train_oversampled$went_on_backorder <- factor(train_oversampled$went_on_backorder, levels = levels(train_oversampled$went_on_backorder), labels = new_levels)
+```
+
+
+We will initiate cross validation of 10-folds in order to make our experiment results with the various models more reliable and less biased.
+
+```{r}
+# Initiate cross validation
+fitControl = trainControl(method = "cv", number = 10, 
+                          classProbs = TRUE, summaryFunction = twoClassSummary)
+```
+
+
+### Building model1 with oversampling
+```{r}
+# Set a seed to allow reproducibility
+set.seed(123)
+
+# Model 1: All Variables with Oversampling (removed sku because it does not provide any useful information)
+model1 <- glm(went_on_backorder ~ . -sku, data = train_oversampled, family = "binomial")
+summary(model1)
+
+caret::train(went_on_backorder~., data = train_oversampled, method = "glm", family = "binomial", trControl = fitControl, metric = "ROC")
+```
+The AUC value achieved by model1 using an oversampled data structure was 0.884. Next, we proceed to experiment with a downsampled dataset to assess its performance comparatively.
+
+### Downsampling Train Data
+```{r}
+library(caret)
+# Use downSample to downsample the dataset
+train_downsampled <- downSample(
+  x = train1[, -1],  # Exclude the target variable and the additional column
+  y = train1$went_on_backorder
+)
+
+# Check levels of the target variable in the downsampled dataset
+table(train_downsampled$went_on_backorder)
+
+# Make names valid
+new_levels_downsample <- make.names(levels(train_downsampled$went_on_backorder), unique = TRUE)
+
+# Refactor the response variable
+train_downsampled$went_on_backorder <- factor(train_downsampled$went_on_backorder, levels = levels(train_downsampled$went_on_backorder), labels = new_levels_downsample)
+
+# Exclude the 'Class' column from train_transformed_downsampled
+train_downsampled <- train_downsampled[, -which(names(train_downsampled) == "Class")]
+```
+
+
+### Building model2 with downsampled train data
+```{r}
+# Set a seed to allow reproducibility
+set.seed(123)
+
+# Model 2: All Variables with downsampling
+model2 <- glm(went_on_backorder ~., data = train_downsampled, family = "binomial")
+summary(model2)
+
+caret::train(went_on_backorder ~., data = train_downsampled, method = "glm", family = "binomial", trControl = fitControl, metric = "ROC")
+```
+The AUC value, a measure of model performance, obtained by Model2 utilizing a downsampled data structure was notably higher at 0.9327 compared to the performance observed with the oversampled training data. This suggests that the model's predictive ability improved substantially when trained on the downsampled dataset.
+
+Given this promising result, we opt to delve deeper into refining the model using the downsampled dataset. By doing so, we aim to capitalize on the enhanced performance observed and potentially uncover further improvements in the model's predictive accuracy and generalization capabilities.
+
+### Building model3 with downsampled train data and further enhancing performance by removing all insignificant variables
+```{r}
+# Set a seed to allow reproducibility
+set.seed(123)
+
+# Model 3:  Downsampling with Significant Variables only
+model3 <- glm(went_on_backorder ~.-forecast_3_month - sales_6_month - potential_issue - perf_12_month_avg - deck_risk - oe_constraint - ppap_risk - stop_auto_buy - rev_stop, data = train_downsampled, family = "binomial")
+summary(model3)
+
+caret::train(went_on_backorder ~. -forecast_3_month - sales_6_month - potential_issue - perf_12_month_avg - deck_risk - oe_constraint - ppap_risk - stop_auto_buy - rev_stop, data = train_downsampled, method = "glm", family = "binomial", trControl = fitControl, metric = "ROC")
+```
+The ROC value achieved by Model3, utilizing a downsampled data structure after removing all insignificant variables, was 0.9332, slightly surpassing the performance of Model2, which included all variables. Consequently, we determine that Model3 represents our final choice for Milestone 1.
+
+### Discussion
+
+#### Model 1 
+This model is based on an oversampled dataset, which received an AUC value of 0.884. The area under the ROC curve (AUC) represents the measure of separability and a higher value indicates a model with better discriminative ability. 
+
+Regardless, it is still essential to develop models using alternative strategies with the possibility of having better computational efficiency and improved model generalisation. 
+
+#### Model 2
+Hence, Model 2 uses a downsampled dataset, achieving a higher AUC value of 0.9327, suggesting better performance compared to the oversampled dataset used in Model 1.
+
+#### Model 3 **(Final model selected)**
+Model 3 further refined Model 2 by removing all insignificant variables and achieved a slightly higher AUC value of 0.9332. This indicates that the removal of these variables did not adversely affect model performance, and therefore, Model 3 is chosen as the final model for Milestone 1.
+
+
+#### Reasons for using downsampling and oversampling
+
+Oversampling is a technique commonly used to increase the number of instances from the minority class in a dataset when there is an imbalanced distribution of data, with one class being significantly underrepresented. It also involves generating synthetic data points that are similar to the existing data from the minority class and adding them to the dataset.
+
+Downsampling is a technique used to decrease the size of a dataset by eliminating some of the instances in the majority class. 
+
+From our Exploratory Data Analysis, we discovered that the data structure is imbalanced with products that did not go on backorder being 68% greater than those that went on backorder. Therefore, our team decided to exercise oversampling and downsampling on the dataset in an attempt to create a model with better predictive ability and less biasedness.
+
+
+#### Possible reasons why downsampling yields higher AUC values
+
+From our testing, handling the imbalanced dataset with downsampling yields higher AUC values compared to oversampling. It is interesting that our result with downsampled data is better, and we hypothesize a few reasons why this is the case.
+
+First, downsampling can eliminate redundancy or irrelevant instances from the dataset. Secondly, downsampled data can help balance the class label and reduce computational complexity and training time without significantly sacrificing the accuracy of the model. However, one limitation is that generating synthetic samples that are too similar to the minority instances may lead to overfitting.
+
+
+### Milestone 1: Final Model Selected and Brief Conclusion: Logistic Regression Model - Downsampling with significant variables only (model3) 
+Our team decided to use a logistic regression model due to the binary nature of the response variable (went_on_backorder). We decided to use only the significant variables that we shortlisted using earlier models so as to not clutter the model with too many variables that do not contribute to an increase in AUC or only contribute to a minimal increase in AUC value. We also incorporated cross-validation into the training of the model due to various considerations. Firstly, we believe that it can allow us to obtain a more reliable estimate of the model's performance. Secondly, cross validation helps us to reduce bias that can occur from only using 1 train-test split. Among the logistic regression models we tried, this model provided the highest AUC value, hence it was selected as the final model for milestone 1. 
+
+# Milestone 2 Analysis
+As mentioned earlier, we have highly correlated variables such as sales and forecasts dimensions. Moving forward, we will adopt a Decision Tree to explore whether these variables play an important role in our prediction. 
+```{r echo = TRUE, message = FALSE, warning = FALSE}
+library(rpart)
+library(rpart.plot)
+```
+
+## cp tuning: final selection cp = 3e-04
+```{r}
+set.seed(123)
+fitControl <- trainControl(method = "cv", number = 10)
+
+# Define the hyperparameter grid
+cpGrid <- expand.grid(cp = (1:20)*0.00005)
+
+# Perform hyperparameter tuning
+cvResults <- train(
+  went_on_backorder ~ .,
+  data = train_downsampled,
+  method = "rpart",
+  trControl = fitControl,
+  tuneGrid = cpGrid
+)
+# Print the results of hyperparameter tuning
+print(cvResults)
+```
+
+## minbucket tuning: final selection minbucket = 30
+```{r}
+set.seed(123)
+fitControl <- trainControl(method = "cv", number = 10)
+
+# Specify values for minbucket
+minbucket_values <- c(5, 10, 20, 30, 50, 70, 90, 100)
+
+# Create an empty list to store results
+minbucket_list <- list()
+
+# Iterate over minbucket values and fit the model
+for (minbucket_val in minbucket_values) {
+  model <- train(
+    went_on_backorder ~ .,
+    data = train_downsampled,
+    method = "rpart",
+    trControl = fitControl,
+    control = rpart.control(cp = 3e-04, minbucket = minbucket_val)
+  )
+  minbucket_list[[as.character(minbucket_val)]] <- model
+}
+# Print the results
+print(minbucket_list)
+```
+
+
+## minsplit tuning: final selection minsplit = 300
+```{r}
+set.seed(123)
+fitControl <- trainControl(method = "cv", number = 10)
+
+# Specify values for minbucket
+minsplit_values <- c(50, 100, 200, 300, 400, 500, 700, 900, 1000)
+
+# Create an empty list to store results
+minsplit_list <- list()
+
+# Iterate over minbucket values and fit the model
+for (minsplit_val in minsplit_values) {
+  model <- train(
+    went_on_backorder ~ .,
+    data = train_downsampled,
+    method = "rpart",
+    trControl = fitControl,
+    control = rpart.control(cp = 3e-04, minbucket = 30, minsplit = minsplit_val )
+  )
+  minsplit_list[[as.character(minsplit_val)]] <- model
+}
+# Print the results
+print(minsplit_list)
+```
+### Plotting BackorderTree1 with control hyperparameter cp = 3e-04, minbucket = 30, minsplit = 300
+```{r}
+BackorderTree1 = rpart(went_on_backorder ~ . , data = train_downsampled, control = rpart.control(minbucket = 30, cp = 3e-04, minsplit = 300 ))
+# Plot the decision tree with improved clarity
+prp(BackorderTree1, 
+    extra = 104, 
+    under = TRUE,
+    box.col = "lightblue",  # Set box color
+    split.col = "darkgreen",  # Set split color
+    branch.lty = 3,  # Set branch line type
+    branch.lwd = 2,  # Set branch line width
+    cex = 0.5,  # Set text size
+    tweak = 1,  # Adjust spacing
+    varlen = 0,  # Display full variable names
+    faclen = 0  # Display full factor levels
+)
+prp(BackorderTree1)
+```
+
+All the predictor variables appear in the decision tree plot by hierarchy level of reading included: forecast_3_month (most important feature), national_inv, forecast_9_month, lead_time, local_bo_qty, perf_6_month_avg, sales_1_month, sales_3_month.
+
+These variables are congruently important as our Logistic Regression Model suggested. **Since Decision Tree model did not give a higher accuracy compared to our Logistic Regression, we used Decision Tree Classification to guide us on the important features such as sales and forecasts to be kept in spite of highly correlated to one another.**
+
+We move on to experiment with Random Forest techniques to compare the method against the decision tree.
+
+## Random Forest
+```{r}
+library(ROCR)
+library(randomForest)
+```
+
+## mtry tuning: final selection mtry = 6
+```{r}
+grid_control <- trainControl(method="cv", number=5, search="grid")
+tune_grid <- expand.grid(.mtry=c(1:20)) 
+grid_search <- train(went_on_backorder ~ .,
+                     data=train_downsampled,
+                     method="rf",
+                     metric="Accuracy",
+                     tuneGrid=tune_grid,
+                     trControl=grid_control)
+print(grid_search)
+```
+
+### Building forest1 using downsampled data set with hyperparameters ntree = 800, and mtry = 6
+```{r}
+set.seed(123)
+forest1 = randomForest(went_on_backorder ~., data = train_downsampled, ntree = 800, nodesize = 10, mtry = 6)
+predictforest1 = predict(forest1, newdata = train_downsampled, type = "prob")
+predf1 = prediction(predictforest1[,2], train_downsampled$went_on_backorder)
+perf1 = performance(predf1, "tpr", "fpr")
+aucf1 = performance(predf1, "auc")
+aucf1@y.values[[1]]
+forest1
+```
+
+The OOB rate is 10.81%.
+
+### Building forest2 using transformed train (train1) data set instead of downsampled data with the same hyperparameters
+```{r}
+set.seed(123)
+forest2 = randomForest(went_on_backorder ~. -sku, data = train1, ntree =800, nodesize = 10, mtry = 6)
+predictforest2 = predict(forest2, newdata = train1, type = "prob")
+predf2 = prediction(predictforest2[,2], train$went_on_backorder)
+perf2 = performance(predf2, "tpr", "fpr")
+aucf2 = performance(predf2, "auc")
+aucf2@y.values[[1]]
+forest2
+```
+The OOB is around 7.4%, which is much lower compared to using downsampled data set. Hence, we will move forward using train1 (transformed) data set.
+
+### Analysis to view the importance of variables in generation of Random Forest model
+```{r}
+importance(forest2)
+varImpPlot(forest2)
+```
+
+### Building forest3 removing the last 4 variables that have least importance in generating Random Forest model according to previous varImpPlot
+```{r}
+set.seed(123)
+
+forest3 = randomForest(went_on_backorder ~.-sku - stop_auto_buy - potential_issue - rev_stop - oe_constraint, data = train1, ntree =800, nodesize = 10, mtry = 6)
+predictforest3 = predict(forest3, newdata = train1, type = "prob")
+predf3 = prediction(predictforest3[,2], train$went_on_backorder)
+perf3 = performance(predf3, "tpr", "fpr")
+aucf3 = performance(predf3, "auc")
+aucf3@y.values[[1]]
+forest3
+```
+
+The OOB remains the same at around 7.4% after removing the last 4 least important variables. Hence, we finalize this forest3 as our final chosen model for Milestone 2.
+
+### Milestone 2: Final Model Selected and Brief Conclusion: Random Forest Model - Downsampling with significant variables only (forest3) 
+
+Our team decided to select the random forest model forest3 as our final model because it yielded the highest AUC value when comparing all models across both milestones in our kaggle submissions.
+
+
+# MODEL PREDICTION
+
+```{r}
+# Predict probabilities for each class
+RF_pred = predict(forest3, newdata = test1, type = "prob")
+RF_pred[,2]
+# Create data frame PredTest with SKU and predicted values
+RFPredTest = data.frame(test1$sku, RF_pred)
+
+confRF = data.frame(test$sku, RF_pred[,2])
+confRF
+confRF$No=NULL
+```
+```
+
+Finally, we tally the variable names and save the predictions in a file. The file can be submitted. The argument, *row.names = FALSE*, prevent R from saving additional column with indecies for each row.
+```{r}
+colnames(confRF) = c("sku", "went_on_backorder")
+str(confRF)
+write.csv(confRF, "Group3submissionFinal.csv", row.names = FALSE)
+```
+
+
+# CONCLUSION
+The transition from oversampling to downsampling between the two milestones suggests a strategy shift in handling class imbalance, possibly due to downsampling providing a better model performance as indicated by the ROC values in Milestone 1.
+
+The improvements in the OOB error rate from the first to the second step in Milestone 2 indicates that pre-processing the training data contributed positively to the Random Forest model's performance.
+
+The final models in both Milestone 1 and Milestone 2 show that additional fine-tuning (like selecting significant variables in Milestone 2) can further optimize the model, although the OOB rate did not change between steps 2 and 3 in Milestone 2.
+
+In summary, the modeling process improved across milestones, with each step seeming to contribute to the optimization of the models. Downsampling and data pre-processing, followed by careful variable selection, appears to be a successful approach in this case.
+
